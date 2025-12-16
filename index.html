@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>政治組排班表</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Babel for JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Import Maps to manage dependencies -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.292.0",
+        "firebase/app": "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"
+      }
+    }
+    </script>
+
+    <style>
+        /* Custom scrollbar for better look */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; 
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { Download, Trash2, Users, Cloud, CloudOff, Calendar, Lock, Unlock, X, Check, AlertTriangle } from 'lucide-react';
+        import { initializeApp } from 'firebase/app';
+        import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+        import { getFirestore, doc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
+
+        // --- Firebase Configuration ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyAJ_b9BiX1zT7WFu8f08uoKxeV8vgDUHz4",
+            authDomain: "fuktrip.firebaseapp.com",
+            projectId: "fuktrip",
+            storageBucket: "fuktrip.firebasestorage.app",
+            messagingSenderId: "663462561018",
+            appId: "1:663462561018:web:d0c9f00c9fed0253a2b543",
+            measurementId: "G-KME94X3EKH"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // Use a fixed global ID for this specific app instance to share data
+        const APP_ID = 'political-schedule-v1'; 
+        const COLLECTION_NAME = 'schedules';
+        const DOC_ID = 'main';
+
+        // --- UI Components ---
+        const Modal = ({ isOpen, onClose, title, children }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+                    <div className="bg-white rounded-lg shadow-xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in duration-200">
+                        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
+                            <h3 className="font-bold text-gray-700">{title}</h3>
+                            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors">
+                                <X size={20} />
+                            </button>
+                        </div>
+                        <div className="p-4">
+                            {children}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const PoliticalGroupSchedule = () => {
+            // --- State Definitions ---
+            
+            // 1. 人員名單
+            const staffList = [
+                '陳妍伶',
+                '吳承翰',
+                '林靜',
+                '林秀宜',
+                '楊凱安',
+                '林彥君',
+                '屈道昀',
+                '王云宣'
+            ];
+
+            // 選項定義 (包含 X)
+            const OPTIONS = ['', '休', '夜', '休播', '年', '補', 'X'];
+
+            // 2. 時間與使用者狀態
+            const today = new Date();
+            const [year, setYear] = useState(today.getFullYear());
+            const [month, setMonth] = useState(today.getMonth() + 1);
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [syncStatus, setSyncStatus] = useState('idle'); // idle, syncing, saved, error
+            
+            // Modals State
+            const [showUnlockModal, setShowUnlockModal] = useState(false);
+            const [unlockPassword, setUnlockPassword] = useState('');
+            const [unlockError, setUnlockError] = useState('');
+            const [showClearModal, setShowClearModal] = useState(false);
+
+            // 3. 資料狀態 (從 Firebase 讀取)
+            const [scheduleData, setScheduleData] = useState({});
+            const [requirements, setRequirements] = useState({}); 
+            const [darkenedDays, setDarkenedDays] = useState({});
+            
+            // 改為 Map 結構，依據 "YYYY-M" 儲存
+            const [lockedMonths, setLockedMonths] = useState({}); 
+            const [deadlines, setDeadlines] = useState({});
+            const [shouldLeaveDaysMap, setShouldLeaveDaysMap] = useState({});
+            const [actualLeaveDaysMap, setActualLeaveDaysMap] = useState({});
+
+            // --- Derived State (Current Month) ---
+            const currentMonthKey = `${year}-${month}`;
+            const isLocked = lockedMonths[currentMonthKey] || false;
+            const currentDeadline = deadlines[currentMonthKey] || '';
+            const currentShouldLeave = shouldLeaveDaysMap[currentMonthKey] || '';
+            const currentActualLeave = actualLeaveDaysMap[currentMonthKey] || '';
+
+            // --- Firebase Logic ---
+
+            // Auth Initialization
+            useEffect(() => {
+                const initAuth = async () => {
+                    try {
+                        await signInAnonymously(auth);
+                    } catch (error) {
+                        console.error("Auth error:", error);
+                        setSyncStatus('error');
+                    }
+                };
+                initAuth();
+
+                const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+                    setUser(currentUser);
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // Data Synchronization (Real-time listener)
+            useEffect(() => {
+                if (!user) return;
+
+                const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', COLLECTION_NAME, DOC_ID);
+
+                const unsubscribe = onSnapshot(docRef, (docSnap) => {
+                    setLoading(false);
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        setScheduleData(data.schedule || {});
+                        setRequirements(data.requirements || {});
+                        setDarkenedDays(data.darkenedDays || {});
+                        
+                        // Load Monthly Maps
+                        setLockedMonths(data.lockedMonths || {});
+                        setDeadlines(data.deadlines || {});
+                        setShouldLeaveDaysMap(data.shouldLeaveDaysMap || {});
+                        setActualLeaveDaysMap(data.actualLeaveDaysMap || {});
+
+                        setSyncStatus('saved');
+                    } else {
+                        const initialData = { 
+                            schedule: {}, 
+                            requirements: {},
+                            darkenedDays: {},
+                            lockedMonths: {},
+                            deadlines: {},
+                            shouldLeaveDaysMap: {},
+                            actualLeaveDaysMap: {}
+                        };
+                        setDoc(docRef, initialData).catch(e => {
+                            console.error("Init doc error:", e);
+                            setSyncStatus('error');
+                        });
+                    }
+                }, (error) => {
+                    console.error("Snapshot error:", error);
+                    setSyncStatus('error');
+                    setLoading(false);
+                });
+
+                return () => unsubscribe();
+            }, [user]);
+
+            // Generic Save Helper
+            const saveToFirebase = async (updates) => {
+                if (!user) return;
+                setSyncStatus('syncing');
+                try {
+                    const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', COLLECTION_NAME, DOC_ID);
+                    await updateDoc(docRef, updates);
+                    setSyncStatus('saved');
+                } catch (error) {
+                    console.error("Save error:", error);
+                    setSyncStatus('error');
+                }
+            };
+
+            // --- Handlers ---
+
+            const handleToggleLock = () => {
+                if (isLocked) {
+                    // 解鎖需要密碼：打開 Modal
+                    setUnlockPassword('');
+                    setUnlockError('');
+                    setShowUnlockModal(true);
+                } else {
+                    // 上鎖直接鎖該月份
+                    const newLockedMonths = { ...lockedMonths, [currentMonthKey]: true };
+                    setLockedMonths(newLockedMonths);
+                    saveToFirebase({ lockedMonths: newLockedMonths });
+                }
+            };
+
+            const confirmUnlock = () => {
+                if (unlockPassword === "123456") {
+                    const newLockedMonths = { ...lockedMonths };
+                    delete newLockedMonths[currentMonthKey]; // 移除鎖定
+                    setLockedMonths(newLockedMonths);
+                    saveToFirebase({ lockedMonths: newLockedMonths });
+                    setShowUnlockModal(false);
+                } else {
+                    setUnlockError("密碼錯誤，請重試");
+                }
+            };
+
+            const handleInputChange = (person, day, value) => {
+                if (isLocked) return;
+                const key = `${year}-${month}-${person}-${day}`;
+                const newData = { ...scheduleData, [key]: value };
+                setScheduleData(newData);
+                saveToFirebase({ schedule: newData });
+            };
+
+            const handleRequirementChange = (day, value) => {
+                if (isLocked) return;
+                const key = `${year}-${month}-${day}`;
+                const numVal = parseInt(value);
+                const newReqs = { ...requirements, [key]: isNaN(numVal) ? 0 : numVal };
+                setRequirements(newReqs);
+                saveToFirebase({ requirements: newReqs });
+            };
+
+            // 處理月份相關資料的變更 (Deadline, Leave Days)
+            const handleMonthlyDataChange = (type, value) => {
+                if (isLocked) return;
+                
+                if (type === 'deadline') {
+                    const newDeadlines = { ...deadlines, [currentMonthKey]: value };
+                    setDeadlines(newDeadlines);
+                    saveToFirebase({ deadlines: newDeadlines });
+                } else if (type === 'shouldLeave') {
+                    const newMap = { ...shouldLeaveDaysMap, [currentMonthKey]: value };
+                    setShouldLeaveDaysMap(newMap);
+                    saveToFirebase({ shouldLeaveDaysMap: newMap });
+                } else if (type === 'actualLeave') {
+                    const newMap = { ...actualLeaveDaysMap, [currentMonthKey]: value };
+                    setActualLeaveDaysMap(newMap);
+                    saveToFirebase({ actualLeaveDaysMap: newMap });
+                }
+            };
+
+            const handleToggleDarkenedDay = (dayDate) => {
+                if (isLocked) return;
+                const key = `${year}-${month}-${dayDate}`;
+                const newStatus = !darkenedDays[key];
+                const newDarkenedDays = { ...darkenedDays, [key]: newStatus };
+                setDarkenedDays(newDarkenedDays);
+                saveToFirebase({ darkenedDays: newDarkenedDays });
+            };
+
+            const handleClearMonth = () => {
+                if (isLocked) return;
+                setShowClearModal(true);
+            };
+
+            const confirmClearMonth = () => {
+                const newData = { ...scheduleData };
+                // 同時清空該月份的排班資料
+                staffList.forEach(person => {
+                    daysInMonth.forEach(day => {
+                        const key = `${year}-${month}-${person}-${day.date}`;
+                        delete newData[key];
+                    });
+                });
+                
+                // 是否也要清空該月份的備註資料？通常保留比較好，這邊只清排班
+                setScheduleData(newData);
+                saveToFirebase({ schedule: newData });
+                setShowClearModal(false);
+            };
+
+            // --- Calculations ---
+
+            const years = Array.from({ length: 11 }, (_, i) => today.getFullYear() - 5 + i);
+            const months = Array.from({ length: 12 }, (_, i) => i + 1);
+
+            // Helper to get required staff for a specific day
+            const getRequiredStaff = (dayDate, isWeekend) => {
+                const key = `${year}-${month}-${dayDate}`;
+                if (requirements[key] !== undefined) {
+                    return requirements[key];
+                }
+                return isWeekend ? 3 : 4; // Default fallback
+            };
+
+            const daysInMonth = useMemo(() => {
+                const date = new Date(year, month, 0);
+                const daysCount = date.getDate();
+                const daysArray = [];
+
+                for (let i = 1; i <= daysCount; i++) {
+                    const currentDay = new Date(year, month - 1, i);
+                    const dayOfWeek = currentDay.getDay(); // 0 is Sunday
+                    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+                    
+                    daysArray.push({
+                        date: i,
+                        dayOfWeek: dayOfWeek,
+                        isWeekend: isWeekend,
+                        dayName: ['日', '一', '二', '三', '四', '五', '六'][dayOfWeek]
+                    });
+                }
+                return daysArray;
+            }, [year, month]);
+
+            const getValue = (person, day) => {
+                if (!scheduleData) return '';
+                const key = `${year}-${month}-${person}-${day}`;
+                return scheduleData[key] || '';
+            };
+
+            const getWorkingCount = (day) => {
+                let count = 0;
+                staffList.forEach(person => {
+                    const val = getValue(person, day);
+                    // 修改邏輯：空白('') 或 'X' 都算作上班
+                    if (val === '' || val === 'X') count++; 
+                });
+                return count;
+            };
+
+            const exportToCSV = () => {
+                let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
+                // Add Deadline and Leave info to CSV
+                csvContent += `月份: ${year}年${month}月, 截止日期: ${currentDeadline}, 應休天數: ${currentShouldLeave}, 實休天數: ${currentActualLeave}\n`;
+                
+                let headerRow = ["人員/日期", ...daysInMonth.map(d => `${d.date}(${d.dayName})`)];
+                csvContent += headerRow.join(",") + "\n";
+
+                staffList.forEach(person => {
+                    let row = [person];
+                    daysInMonth.forEach(d => {
+                        let val = getValue(person, d.date);
+                        row.push(`"${val.replace(/"/g, '""')}"`); 
+                    });
+                    csvContent += row.join(",") + "\n";
+                });
+
+                let reqRow = ["需求人數"];
+                daysInMonth.forEach(d => {
+                    reqRow.push(getRequiredStaff(d.date, d.isWeekend));
+                });
+                csvContent += reqRow.join(",") + "\n";
+
+                let statsRow = ["上班人數"];
+                daysInMonth.forEach(d => {
+                    statsRow.push(getWorkingCount(d.date));
+                });
+                csvContent += statsRow.join(",") + "\n";
+
+                // 新增可休人數匯出
+                let availableRow = ["可休人數"];
+                daysInMonth.forEach(d => {
+                    const count = getWorkingCount(d.date);
+                    const req = getRequiredStaff(d.date, d.isWeekend);
+                    availableRow.push(count - req);
+                });
+                csvContent += availableRow.join(",") + "\n";
+
+                const encodedUri = encodeURI(csvContent);
+                const link = document.createElement("a");
+                link.setAttribute("href", encodedUri);
+                link.setAttribute("download", `政治組排班表_${year}_${month}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            const getSelectStyle = (value) => {
+                let baseStyle = "w-full h-10 px-1 text-center bg-transparent border-none focus:ring-2 focus:ring-inset focus:ring-blue-500 text-sm appearance-none cursor-pointer font-bold ";
+                // 鎖定時移除 cursor-pointer
+                if (isLocked) {
+                    baseStyle = baseStyle.replace('cursor-pointer', 'cursor-not-allowed opacity-70');
+                }
+
+                if (value === '夜') {
+                    return baseStyle + "text-amber-500"; 
+                } else if (value === 'X') {
+                    return baseStyle + "text-red-600"; // X 顯示為紅色
+                } else if (value) {
+                    return baseStyle + "text-blue-600";
+                } else {
+                    return baseStyle + "text-gray-400 font-normal";
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-800 relative">
+                    {/* Header Section */}
+                    <header className="bg-white border-b border-gray-200 sticky top-0 z-40 shadow-sm">
+                        <div className="max-w-full px-4 sm:px-6 lg:px-8 h-auto sm:h-16 py-2 sm:py-0 flex flex-col sm:flex-row items-center justify-between gap-3">
+                            
+                            {/* Logo & Title & Extra Info */}
+                            <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto justify-between sm:justify-start">
+                                <div className="flex items-center gap-2">
+                                    <div className="bg-blue-600 p-2 rounded-lg text-white">
+                                        <Users size={20} />
+                                    </div>
+                                    <h1 className="text-xl font-bold tracking-tight text-gray-900 whitespace-nowrap">
+                                        政治組排班表
+                                    </h1>
+                                </div>
+
+                                {/* Lock/Unlock Button */}
+                                <button
+                                    onClick={handleToggleLock}
+                                    className={`
+                                        p-1.5 rounded-md transition-colors border
+                                        ${isLocked 
+                                            ? 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100' 
+                                            : 'bg-green-50 text-green-600 border-green-200 hover:bg-green-100'
+                                        }
+                                    `}
+                                    title={isLocked ? "解鎖本月" : "鎖定本月"}
+                                >
+                                    {isLocked ? <Lock size={16} /> : <Unlock size={16} />}
+                                </button>
+
+                                {/* Deadline Input (Shrunk) */}
+                                <div className="flex items-center bg-red-50 border border-red-100 rounded px-2 py-1 ml-0 sm:ml-2">
+                                    <span className="text-xs text-red-500 font-medium mr-1 whitespace-nowrap">截止:</span>
+                                    <input 
+                                        type="text" 
+                                        disabled={isLocked}
+                                        placeholder="日期" 
+                                        value={currentDeadline}
+                                        onChange={(e) => handleMonthlyDataChange('deadline', e.target.value)}
+                                        className={`bg-transparent border-b border-red-200 text-sm text-red-700 w-16 focus:outline-none focus:border-red-400 placeholder-red-200 ${isLocked ? 'cursor-not-allowed opacity-60' : ''}`}
+                                    />
+                                </div>
+
+                                {/* Should Leave Input */}
+                                <div className="flex items-center bg-blue-50 border border-blue-100 rounded px-2 py-1 ml-0 sm:ml-1">
+                                    <span className="text-xs text-blue-500 font-medium mr-1 whitespace-nowrap">應休:</span>
+                                    <input 
+                                        type="text" 
+                                        disabled={isLocked}
+                                        placeholder="天" 
+                                        value={currentShouldLeave}
+                                        onChange={(e) => handleMonthlyDataChange('shouldLeave', e.target.value)}
+                                        className={`bg-transparent border-b border-blue-200 text-sm text-blue-700 w-8 sm:w-10 text-center focus:outline-none focus:border-blue-400 placeholder-blue-200 ${isLocked ? 'cursor-not-allowed opacity-60' : ''}`}
+                                    />
+                                </div>
+
+                                {/* Actual Leave Input */}
+                                <div className="flex items-center bg-green-50 border border-green-100 rounded px-2 py-1 ml-0 sm:ml-1">
+                                    <span className="text-xs text-green-500 font-medium mr-1 whitespace-nowrap">實休:</span>
+                                    <input 
+                                        type="text" 
+                                        disabled={isLocked}
+                                        placeholder="天" 
+                                        value={currentActualLeave}
+                                        onChange={(e) => handleMonthlyDataChange('actualLeave', e.target.value)}
+                                        className={`bg-transparent border-b border-green-200 text-sm text-green-700 w-8 sm:w-10 text-center focus:outline-none focus:border-green-400 placeholder-green-200 ${isLocked ? 'cursor-not-allowed opacity-60' : ''}`}
+                                    />
+                                </div>
+                                
+                                {/* Sync Status (Mobile) */}
+                                <div className="sm:hidden ml-auto">
+                                    {syncStatus === 'syncing' ? <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div> : 
+                                    syncStatus === 'saved' ? <div className="w-2 h-2 bg-green-500 rounded-full"></div> : 
+                                    <div className="w-2 h-2 bg-red-500 rounded-full"></div>}
+                                </div>
+                            </div>
+
+                            {/* Controls */}
+                            <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-4 w-full sm:w-auto mt-2 sm:mt-0">
+                                {/* Date Selectors */}
+                                <div className="flex gap-2">
+                                    <div className="flex items-center bg-gray-100 rounded-md p-1">
+                                        <select 
+                                            value={year} 
+                                            onChange={(e) => setYear(Number(e.target.value))}
+                                            className="bg-transparent border-none text-sm font-medium focus:ring-0 cursor-pointer py-1 pl-1 pr-6"
+                                        >
+                                            {years.map(y => <option key={y} value={y}>{y}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="flex items-center bg-gray-100 rounded-md p-1">
+                                        <select 
+                                            value={month} 
+                                            onChange={(e) => setMonth(Number(e.target.value))}
+                                            className="bg-transparent border-none text-sm font-medium focus:ring-0 cursor-pointer py-1 pl-1 pr-6"
+                                        >
+                                            {months.map(m => <option key={m} value={m}>{m}月</option>)}
+                                        </select>
+                                    </div>
+                                </div>
+                                
+                                <div className="h-6 w-px bg-gray-300 hidden sm:block"></div>
+
+                                {/* Action Buttons */}
+                                <div className="flex gap-2">
+                                    <button 
+                                        onClick={exportToCSV}
+                                        className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 rounded-md transition-colors"
+                                        title="匯出 CSV"
+                                    >
+                                        <Download size={16} />
+                                        <span className="hidden sm:inline">匯出</span>
+                                    </button>
+                                    <button 
+                                        onClick={handleClearMonth}
+                                        disabled={isLocked}
+                                        className={`flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 text-sm font-medium rounded-md transition-colors
+                                            ${isLocked 
+                                                ? 'text-gray-400 bg-gray-100 cursor-not-allowed' 
+                                                : 'text-red-600 hover:bg-red-50'
+                                            }
+                                        `}
+                                        title="清空本月"
+                                    >
+                                        <Trash2 size={16} />
+                                        <span className="hidden sm:inline">清空</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Main Content - Table */}
+                    <main className="flex-1 overflow-hidden relative flex flex-col">
+                        {loading ? (
+                            <div className="flex-1 flex items-center justify-center text-gray-500 gap-2">
+                                <Cloud className="animate-bounce" /> 載入資料中...
+                            </div>
+                        ) : (
+                            <div className="flex-1 overflow-auto relative">
+                                <table className="border-collapse w-full min-w-max text-sm">
+                                    <thead className="bg-white z-20 sticky top-0 shadow-sm">
+                                        <tr>
+                                            {/* Fixed Top-Left Corner */}
+                                            <th className="sticky left-0 top-0 z-30 bg-gray-100 border-b border-r border-gray-300 min-w-[100px] p-2 text-center font-bold text-gray-700 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)]">
+                                                人員 \ 日期
+                                            </th>
+                                            
+                                            {/* Date Headers */}
+                                            {daysInMonth.map((day) => {
+                                                const reqStaff = getRequiredStaff(day.date, day.isWeekend);
+                                                const isDarkened = darkenedDays[`${year}-${month}-${day.date}`];
+                                                
+                                                return (
+                                                    <th 
+                                                        key={day.date} 
+                                                        onDoubleClick={() => handleToggleDarkenedDay(day.date)}
+                                                        className={`
+                                                            border-b border-r border-gray-200 p-1 min-w-[50px] text-center transition-colors align-top select-none
+                                                            ${isLocked ? 'cursor-default' : 'cursor-pointer'}
+                                                            ${isDarkened 
+                                                                ? 'bg-gray-600 text-white border-gray-500' 
+                                                                : (day.isWeekend ? 'bg-orange-50 text-orange-800' : 'bg-white text-gray-600')
+                                                            }
+                                                        `}
+                                                        title={isLocked ? "" : "雙擊切換深色標記"}
+                                                    >
+                                                        <div className="flex flex-col items-center py-1 gap-1">
+                                                            <span className={`text-xs ${isDarkened ? 'opacity-90' : 'opacity-70'}`}>{day.dayName}</span>
+                                                            <span className="font-bold text-lg leading-none">{day.date}</span>
+                                                            {/* 可編輯的上班人數需求 */}
+                                                            <div className={`flex items-center justify-center mt-1 rounded-full px-1 ${isDarkened ? 'bg-white/20 text-white' : 'bg-black/5'}`}>
+                                                                <span className={`text-[10px] mr-1 ${isDarkened ? 'text-gray-200' : 'text-gray-500'}`}>需</span>
+                                                                <input 
+                                                                    type="number"
+                                                                    disabled={isLocked}
+                                                                    min="0"
+                                                                    max="99"
+                                                                    value={reqStaff}
+                                                                    onChange={(e) => handleRequirementChange(day.date, e.target.value)}
+                                                                    className={`w-5 text-[10px] font-bold bg-transparent text-center focus:outline-none 
+                                                                        ${isLocked ? 'cursor-not-allowed opacity-80' : ''}
+                                                                        ${isDarkened ? 'text-white focus:text-blue-300' : 'focus:text-blue-600'}`}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    </th>
+                                                );
+                                            })}
+                                        </tr>
+                                    </thead>
+                                    
+                                    <tbody>
+                                        {/* Staff Rows */}
+                                        {staffList.map((person) => (
+                                            <tr key={person} className="group hover:bg-gray-50">
+                                                <td className="sticky left-0 z-10 bg-white group-hover:bg-gray-50 border-r border-b border-gray-300 font-medium text-gray-900 text-center shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)] px-2">
+                                                    <div className="flex items-center justify-center gap-2 h-10">
+                                                        <span className="w-6 h-6 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center text-xs font-bold">
+                                                            {person.charAt(0)}
+                                                        </span>
+                                                        {person}
+                                                    </div>
+                                                </td>
+
+                                                {daysInMonth.map((day) => {
+                                                    const isWeekend = day.isWeekend;
+                                                    const currentValue = getValue(person, day.date);
+                                                    const isDarkened = darkenedDays[`${year}-${month}-${day.date}`];
+
+                                                    return (
+                                                        <td 
+                                                            key={`${person}-${day.date}`} 
+                                                            className={`
+                                                                border-r border-b border-gray-200 p-0 relative
+                                                                ${isDarkened 
+                                                                    ? 'bg-gray-200' // 當標題是深灰色時，下面的格子給予一個淡灰色背景，方便識別
+                                                                    : (isWeekend ? 'bg-orange-50/30' : 'bg-white')
+                                                                }
+                                                            `}
+                                                        >
+                                                            <select
+                                                                disabled={isLocked}
+                                                                value={currentValue}
+                                                                onChange={(e) => handleInputChange(person, day.date, e.target.value)}
+                                                                className={getSelectStyle(currentValue)}
+                                                                style={{ textAlignLast: 'center' }}
+                                                            >
+                                                                {OPTIONS.map(opt => (
+                                                                    <option key={opt} value={opt}>
+                                                                        {opt === '' ? '' : opt}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                            <div className="absolute right-0 top-0 bottom-0 w-2 pointer-events-none opacity-0 group-hover/td:opacity-30"></div>
+                                                        </td>
+                                                    );
+                                                })}
+                                            </tr>
+                                        ))}
+
+                                        {/* Statistics Row 1: 上班人數 */}
+                                        <tr className="bg-gray-100 font-bold border-t-2 border-gray-300">
+                                            <td className="sticky left-0 z-10 bg-gray-100 border-r border-b border-gray-300 text-gray-700 text-center shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)] px-2 h-10">
+                                                上班人數
+                                            </td>
+                                            {daysInMonth.map((day) => {
+                                                const count = getWorkingCount(day.date);
+                                                const reqStaff = getRequiredStaff(day.date, day.isWeekend);
+                                                const isShortage = count < reqStaff;
+                                                const isDarkened = darkenedDays[`${year}-${month}-${day.date}`];
+                                                
+                                                return (
+                                                    <td 
+                                                        key={`stats-${day.date}`}
+                                                        className={`
+                                                            text-center border-r border-b border-gray-300 h-10
+                                                            ${isDarkened ? 'bg-gray-200 border-gray-300' : ''}
+                                                            ${isShortage ? 'text-red-600 ' + (isDarkened ? '' : 'bg-red-50') : 'text-green-700'}
+                                                        `}
+                                                    >
+                                                        {count}
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+
+                                        {/* Statistics Row 2: 可休人數 (上班 - 需求) */}
+                                        <tr className="bg-gray-50 font-bold border-t border-gray-200">
+                                            <td className="sticky left-0 z-10 bg-gray-50 border-r border-b border-gray-300 text-gray-700 text-center shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)] px-2 h-10">
+                                                可休人數
+                                            </td>
+                                            {daysInMonth.map((day) => {
+                                                const count = getWorkingCount(day.date);
+                                                const reqStaff = getRequiredStaff(day.date, day.isWeekend);
+                                                const available = count - reqStaff;
+                                                const isDarkened = darkenedDays[`${year}-${month}-${day.date}`];
+                                                
+                                                // 顏色邏輯：正數(藍色)表示有多餘人力，負數(紅色)表示缺人
+                                                let textColor = 'text-gray-400';
+                                                if (available > 0) textColor = 'text-blue-600';
+                                                if (available < 0) textColor = 'text-red-600';
+
+                                                return (
+                                                    <td 
+                                                        key={`available-${day.date}`}
+                                                        className={`
+                                                            text-center border-r border-b border-gray-300 h-10 ${textColor}
+                                                            ${isDarkened ? 'bg-gray-200 border-gray-300' : ''}
+                                                        `}
+                                                    >
+                                                        {available}
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Footer */}
+                    <footer className="bg-white border-t border-gray-200 px-6 py-2 text-xs text-gray-500 flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                            {syncStatus === 'syncing' && <span className="flex items-center text-blue-600"><Cloud size={12} className="mr-1 animate-pulse"/> 同步中...</span>}
+                            {syncStatus === 'saved' && <span className="flex items-center text-green-600"><Cloud size={12} className="mr-1"/> 已儲存至雲端</span>}
+                            {syncStatus === 'error' && <span className="flex items-center text-red-600"><CloudOff size={12} className="mr-1"/> 連線異常</span>}
+                        </div>
+                        <div>
+                            Vibe Coding 製作
+                        </div>
+                    </footer>
+
+                    {/* Unlock Modal */}
+                    <Modal 
+                        isOpen={showUnlockModal} 
+                        onClose={() => setShowUnlockModal(false)} 
+                        title={`解鎖 ${year}年${month}月 資料`}
+                    >
+                        <div className="flex flex-col gap-4">
+                            <p className="text-sm text-gray-600">請輸入管理員密碼以繼續編輯：</p>
+                            <input 
+                                type="password" 
+                                value={unlockPassword}
+                                onChange={(e) => {
+                                    setUnlockPassword(e.target.value);
+                                    setUnlockError('');
+                                }}
+                                onKeyDown={(e) => e.key === 'Enter' && confirmUnlock()}
+                                className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                placeholder="輸入密碼..."
+                                autoFocus
+                            />
+                            {unlockError && <p className="text-xs text-red-500 font-bold">{unlockError}</p>}
+                            <div className="flex justify-end gap-2 mt-2">
+                                <button 
+                                    onClick={() => setShowUnlockModal(false)}
+                                    className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
+                                >
+                                    取消
+                                </button>
+                                <button 
+                                    onClick={confirmUnlock}
+                                    className="px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors font-medium"
+                                >
+                                    確認解鎖
+                                </button>
+                            </div>
+                        </div>
+                    </Modal>
+
+                    {/* Clear Confirmation Modal */}
+                    <Modal 
+                        isOpen={showClearModal} 
+                        onClose={() => setShowClearModal(false)} 
+                        title="確認清空"
+                    >
+                        <div className="flex flex-col gap-4">
+                            <div className="flex items-center gap-3 text-red-600 bg-red-50 p-3 rounded-md">
+                                <AlertTriangle size={24} />
+                                <span className="font-bold text-sm">警告：此動作無法復原！</span>
+                            </div>
+                            <p className="text-sm text-gray-700 leading-relaxed">
+                                您確定要清空 <span className="font-bold">{year}年{month}月</span> 的所有排班資料嗎？
+                            </p>
+                            <div className="flex justify-end gap-2 mt-2">
+                                <button 
+                                    onClick={() => setShowClearModal(false)}
+                                    className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
+                                >
+                                    取消
+                                </button>
+                                <button 
+                                    onClick={confirmClearMonth}
+                                    className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors font-medium"
+                                >
+                                    確認清空
+                                </button>
+                            </div>
+                        </div>
+                    </Modal>
+
+                </div>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<PoliticalGroupSchedule />);
+    </script>
+</body>
+</html>
